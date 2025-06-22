@@ -13,9 +13,20 @@ brew install ollama
 ```shell
 curl -fsSL https://ollama.ai/install.sh | sh
 ```
+#### Pulling a Model
+The default model that is used in this project is `llama3.1:8b`, you can pull the model using `ollama`:
+
+```shell
+ollama pull llama3.1:8b
+```
 
 #### Start Ollama service
+Starting the Ollama service is required to run the project. You can do this by running:
+
+```shell
 ollama serve
+```
+
 
 ### Project with `uv`
 The easiest way to run the project is to use [uv](https://astral.sh/), which is a command line tool that helps to run Python scripts with a flexible command line interface.
@@ -47,7 +58,15 @@ uv run main.py analyze --help
 ```
 
 ## For other Projects
+
 Install the package with `uv pip` to make is accessible in other projects:
+
 ```shell
 uv pip install -e .
-```g
+```
+
+Then navigate to another porject and run the command:
+
+```shell
+gitbot analyze --unstaged
+```
