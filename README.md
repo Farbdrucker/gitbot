@@ -50,4 +50,4 @@ uv run main.py analyze --help
 Install the package with `uv pip` to make is accessible in other projects:
 ```shell
 uv pip install -e .
-``
+```g
