@@ -430,7 +430,7 @@ app = typer.Typer(
     rich_markup_mode="rich"
 )
 
-@app.command()
+@app.command("analyze", short_help="Analyze git changes and generate commit messages")
 def analyze(
         unstaged: bool = typer.Option(False, "--unstaged", help="Analyze unstaged changes instead of staged"),
         model: str = typer.Option("llama3.1:8b", "--model", help="Ollama model to use"),
