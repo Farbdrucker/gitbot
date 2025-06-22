@@ -544,10 +544,10 @@ def analyze(
             if commit:
                 confirm = typer.confirm("\nCommit with this message?")
                 if confirm:
-                    commit_cmd = ["git", "commit", "-m"]
+                    commit_cmd = ["git", "commit"]
                     if unstaged:
                         commit_cmd.append("-a")
-                    commit_cmd.append(commit_message)
+                    commit_cmd.extend(["-m", f'\"commit_message\"'])
                     run_subprocess_command(commit_cmd)
                     console.print(
                         "✅ [bold green]Changes committed successfully![/bold green]"
