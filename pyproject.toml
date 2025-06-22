@@ -1,0 +1,19 @@
+[project]
+name = "gitbot"
+version = "0.1.0"
+description = "Local AI agent to create git commit messages based on the changes"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.11.7",
+    "pydantic-ai>=0.3.2",
+    "rich>=14.0.0",
+    "typer>=0.16.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.4.1",
+    "ruff>=0.12.0",
+    "ty>=0.0.1a11",
+]
