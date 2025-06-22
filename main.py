@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-Git Diff Analyzer - Generates structured commit messages using PydanticAI with Ollama
+Functional Git Diff Analyzer - Generates structured commit messages using functional programming
 """
 
 import subprocess
 import logging
-from typing import List, Optional, Annotated
+import json
+import asyncio
+from typing import List, Optional, Dict, Any, Tuple, Callable, Union
+from dataclasses import dataclass
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
 from pydantic_ai.models.openai import OpenAIModel
@@ -28,6 +31,7 @@ logger = logging.getLogger(__name__)
 # Initialize rich console
 console = Console()
 
+# Data Models (immutable by design)
 class FileChange(BaseModel):
     """Represents changes to a single file"""
     file_path: str = Field(description="Path to the changed file")
@@ -43,237 +47,289 @@ class CommitSummary(BaseModel):
     file_changes: List[FileChange] = Field(description="List of individual file changes")
     commit_type: str = Field(description="Type of commit: feat, fix, docs, style, refactor, test, chore")
 
-class GitDiffAnalyzer:
-    def __init__(self, model_name: str = "llama3.2", base_url: str = "http://localhost:11434/v1"):
-        """Initialize the analyzer with PydanticAI agent using Ollama"""
-        logger.info(f"Initializing analyzer with model: {model_name}")
+@dataclass(frozen=True)
+class AnalyzerConfig:
+    """Immutable configuration for the analyzer"""
+    model_name: str = "llama3.2"
+    base_url: str = "http://localhost:11434/v1"
+    supports_structured_output: bool = True
 
-        self.ollama_model = OpenAIModel(
-            model_name=model_name,
-            provider=OpenAIProvider(base_url=base_url)
+@dataclass(frozen=True)
+class GitContext:
+    """Immutable context about git repository state"""
+    is_git_repo: bool
+    has_staged_changes: bool
+    diff_output: str
+
+# Pure Functions for Git Operations
+def run_git_command(cmd: List[str]) -> str:
+    """Pure function to run git command and return output"""
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        return result.stdout
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"Git command failed: {e}")
+
+def check_git_repo() -> bool:
+    """Check if current directory is a git repository"""
+    try:
+        subprocess.run(["git", "rev-parse", "--git-dir"], capture_output=True, check=True)
+        return True
+    except subprocess.CalledProcessError:
+        return False
+
+def check_staged_changes() -> bool:
+    """Check if there are staged changes"""
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--staged", "--name-only"],
+            capture_output=True, text=True, check=True
+        )
+        return bool(result.stdout.strip())
+    except subprocess.CalledProcessError:
+        return False
+
+def get_git_diff(staged: bool = True) -> str:
+    """Get git diff output"""
+    cmd_base = ["git", "diff", "--staged"] if staged else ["git", "diff"]
+
+    # Get file status and stats
+    status_output = run_git_command(cmd_base + ["--stat", "--name-status"])
+
+    # Get actual diff content
+    diff_content = run_git_command(cmd_base)
+
+    return f"File Status:\n{status_output}\n\nDiff Content:\n{diff_content}"
+
+def create_git_context(staged: bool = True) -> GitContext:
+    """Create immutable git context"""
+    is_repo = check_git_repo()
+    has_staged = check_staged_changes() if staged else True
+    diff_output = get_git_diff(staged) if is_repo and has_staged else ""
+
+    return GitContext(
+        is_git_repo=is_repo,
+        has_staged_changes=has_staged,
+        diff_output=diff_output
+    )
+
+# Pure Functions for Validation
+def validate_git_context(context: GitContext, staged: bool) -> Union[GitContext, RuntimeError]:
+    """Validate git context and return it or an error"""
+    if not context.is_git_repo:
+        return RuntimeError("Not in a git repository")
+
+    if staged and not context.has_staged_changes:
+        return RuntimeError("No staged changes found. Use 'git add' to stage files first.")
+
+    if not context.diff_output.strip():
+        return RuntimeError("No changes found")
+
+    return context
+
+# Pure Functions for AI Model Creation
+def create_system_prompt() -> str:
+    """Create system prompt for AI analysis"""
+    return """
+    You are an expert software developer who writes excellent commit messages.
+
+    Analyze git diff output and create structured commit summaries that follow conventional commit format.
+
+    Guidelines:
+    - Use conventional commit types: feat, fix, docs, style, refactor, test, chore
+    - Keep overall summary under 50 characters when possible
+    - Be specific about what changed, not just which files
+    - Focus on the "why" and "what" rather than technical details
+    - For each file, summarize the purpose/impact of changes
+    - Identify the change type accurately (added/modified/deleted/renamed)
+
+    Examples of good summaries:
+    - "Add user authentication middleware"
+    - "Fix memory leak in data processing loop"
+    - "Update API documentation for v2 endpoints"
+
+    Return your analysis in the exact JSON structure requested.
+    """
+
+def create_fallback_prompt() -> str:
+    """Create fallback prompt for models without structured output"""
+    return """
+    You are an expert software developer who writes excellent commit messages.
+
+    Analyze git diff output and create a commit message that follows conventional commit format.
+
+    Guidelines:
+    - Use conventional commit types: feat, fix, docs, style, refactor, test, chore
+    - Keep the first line under 50 characters when possible
+    - Be specific about what changed, not just which files
+    - Focus on the "why" and "what" rather than technical details
+
+    Format your response as JSON with this exact structure:
+    {
+      "overall_summary": "brief one-line summary",
+      "detailed_description": "optional longer description",
+      "commit_type": "feat|fix|docs|style|refactor|test|chore",
+      "file_changes": [
+        {
+          "file_path": "path/to/file",
+          "change_type": "added|modified|deleted|renamed",
+          "summary": "what changed in this file",
+          "lines_added": 0,
+          "lines_removed": 0
+        }
+      ]
+    }
+
+    Examples of good summaries:
+    - "Add user authentication middleware"
+    - "Fix memory leak in data processing loop"
+    - "Update API documentation for v2 endpoints"
+
+    IMPORTANT: Return ONLY the JSON, no other text.
+    """
+
+def create_agent(config: AnalyzerConfig) -> Tuple[Agent, bool]:
+    """Create AI agent with configuration"""
+    model = OpenAIModel(
+        model_name=config.model_name,
+        provider=OpenAIProvider(base_url=config.base_url)
+    )
+
+    try:
+        agent = Agent(
+            model=model,
+            result_type=CommitSummary,
+            system_prompt=create_system_prompt()
+        )
+        return agent, True
+    except Exception as e:
+        logger.warning(f"Model doesn't support structured output, falling back to text mode: {e}")
+        agent = Agent(
+            model=model,
+            system_prompt=create_fallback_prompt()
+        )
+        return agent, False
+
+# Pure Functions for Response Processing
+def clean_json_response(response: str) -> str:
+    """Clean JSON response from markdown formatting"""
+    response = response.strip()
+    if response.startswith('```json'):
+        response = response.split('```json')[1].split('```')[0].strip()
+    elif response.startswith('```'):
+        response = response.split('```')[1].split('```')[0].strip()
+    return response
+
+def parse_json_response(response: str) -> Dict[str, Any]:
+    """Parse JSON response with error handling"""
+    try:
+        cleaned = clean_json_response(response)
+        return json.loads(cleaned)
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse JSON response: {e}")
+        return {
+            "overall_summary": "Update files",
+            "commit_type": "chore",
+            "file_changes": [],
+            "detailed_description": f"AI response: {response[:200]}..."
+        }
+
+def create_commit_summary_from_dict(data: Dict[str, Any]) -> CommitSummary:
+    """Create CommitSummary from dictionary"""
+    return CommitSummary(**data)
+
+# Higher-order Functions for Analysis Pipeline
+def create_analysis_pipeline(agent: Agent, supports_structured: bool) -> Callable[[str], Callable]:
+    """Create analysis pipeline function"""
+    async def analyze_diff(diff_output: str) -> CommitSummary:
+        result = await agent.run(
+            f"Analyze this git diff and create a structured commit summary:\n\n{diff_output}"
         )
 
-        # Try to create agent with structured output, fallback to text if tools not supported
-        try:
-            self.agent = Agent(
-                model=self.ollama_model,
-                result_type=CommitSummary,
-                system_prompt="""
-                You are an expert software developer who writes excellent commit messages.
+        if supports_structured:
+            return result.data
+        else:
+            # Functional composition for fallback processing
+            return (lambda x: create_commit_summary_from_dict(parse_json_response(x)))(result.data)
 
-                Analyze git diff output and create structured commit summaries that follow conventional commit format.
+    return analyze_diff
 
-                Guidelines:
-                - Use conventional commit types: feat, fix, docs, style, refactor, test, chore
-                - Keep overall summary under 50 characters when possible
-                - Be specific about what changed, not just which files
-                - Focus on the "why" and "what" rather than technical details
-                - For each file, summarize the purpose/impact of changes
-                - Identify the change type accurately (added/modified/deleted/renamed)
+# Pure Functions for Formatting
+def format_commit_message(summary: CommitSummary) -> str:
+    """Format the commit summary as a conventional commit message"""
+    lines = [f"{summary.commit_type}: {summary.overall_summary}"]
 
-                Examples of good summaries:
-                - "Add user authentication middleware"
-                - "Fix memory leak in data processing loop"
-                - "Update API documentation for v2 endpoints"
+    if summary.detailed_description:
+        lines.extend(["", summary.detailed_description])
 
-                Return your analysis in the exact JSON structure requested.
-                """
-            )
-            self.supports_structured_output = True
-        except Exception as e:
-            logger.warning(f"Model doesn't support structured output, falling back to text mode: {e}")
-            self.agent = Agent(
-                model=self.ollama_model,
-                system_prompt="""
-                You are an expert software developer who writes excellent commit messages.
+    if summary.file_changes:
+        lines.extend(["", "Files changed:"])
+        for change in summary.file_changes:
+            line = f"- {change.file_path}: {change.summary}"
+            if change.lines_added or change.lines_removed:
+                line += f" (+{change.lines_added}/-{change.lines_removed})"
+            lines.append(line)
 
-                Analyze git diff output and create a commit message that follows conventional commit format.
+    return "\n".join(lines)
 
-                Guidelines:
-                - Use conventional commit types: feat, fix, docs, style, refactor, test, chore
-                - Keep the first line under 50 characters when possible
-                - Be specific about what changed, not just which files
-                - Focus on the "why" and "what" rather than technical details
+# Higher-order Functions for Effects
+def with_progress(description: str) -> Callable:
+    """Higher-order function to wrap async operations with progress"""
+    def decorator(func: Callable) -> Callable:
+        async def wrapper(*args, **kwargs):
+            with Progress(
+                    SpinnerColumn(),
+                    TextColumn("[progress.description]{task.description}"),
+                    console=console,
+                    transient=True
+            ) as progress:
+                task = progress.add_task(description, total=None)
+                result = await func(*args, **kwargs)
+                progress.update(task, completed=True)
+                return result
+        return wrapper
+    return decorator
 
-                Format your response as JSON with this exact structure:
-                {
-                  "overall_summary": "brief one-line summary",
-                  "detailed_description": "optional longer description",
-                  "commit_type": "feat|fix|docs|style|refactor|test|chore",
-                  "file_changes": [
-                    {
-                      "file_path": "path/to/file",
-                      "change_type": "added|modified|deleted|renamed",
-                      "summary": "what changed in this file",
-                      "lines_added": 0,
-                      "lines_removed": 0
-                    }
-                  ]
-                }
+# Main Analysis Function (Functional Composition)
+async def analyze_git_changes(config: AnalyzerConfig, staged: bool = True) -> CommitSummary:
+    """Main analysis function using functional composition"""
+    # Create immutable context
+    context = create_git_context(staged)
 
-                Examples of good summaries:
-                - "Add user authentication middleware"
-                - "Fix memory leak in data processing loop"
-                - "Update API documentation for v2 endpoints"
+    # Validate context
+    validated = validate_git_context(context, staged)
+    if isinstance(validated, RuntimeError):
+        raise validated
 
-                IMPORTANT: Return ONLY the JSON, no other text.
-                """
-            )
-            self.supports_structured_output = False
-        logger.info("Agent initialized successfully")
+    # Create agent
+    agent, supports_structured = create_agent(config)
 
-    def get_git_diff(self, staged: bool = True) -> str:
-        """Get git diff output"""
-        logger.info(f"Getting git diff (staged: {staged})")
+    # Create analysis pipeline
+    analyze = create_analysis_pipeline(agent, supports_structured)
 
-        try:
-            # Get staged changes by default, or all changes if staged=False
-            cmd = ["git", "diff", "--staged"] if staged else ["git", "diff"]
+    # Apply progress wrapper and run analysis
+    analyze_with_progress = with_progress("Analyzing changes with AI...")(analyze)
 
-            # Add --name-status for file change types and --stat for line counts
-            logger.debug(f"Running command: {' '.join(cmd + ['--stat', '--name-status'])}")
-            diff_output = subprocess.run(
-                cmd + ["--stat", "--name-status"],
-                capture_output=True,
-                text=True,
-                check=True
-            )
+    return await analyze_with_progress(context.diff_output)
 
-            # Also get the actual diff content
-            logger.debug(f"Running command: {' '.join(cmd)}")
-            diff_content = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                check=True
-            )
+# Utility Functions for CLI
+def run_subprocess_command(cmd: List[str]) -> str:
+    """Run subprocess command and return output"""
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        return result.stdout
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"Command failed: {e}")
 
-            combined_diff = f"File Status:\n{diff_output.stdout}\n\nDiff Content:\n{diff_content.stdout}"
-            logger.info(f"Retrieved diff with {len(combined_diff)} characters")
-            return combined_diff
+def check_ollama_available() -> bool:
+    """Check if Ollama is available"""
+    try:
+        subprocess.run(["ollama", "list"], capture_output=True, check=True)
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
 
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Git command failed: {e}")
-            raise RuntimeError(f"Git command failed: {e}")
-
-    def check_git_repo(self) -> bool:
-        """Check if current directory is a git repository"""
-        logger.debug("Checking if current directory is a git repository")
-        try:
-            subprocess.run(
-                ["git", "rev-parse", "--git-dir"],
-                capture_output=True,
-                check=True
-            )
-            logger.debug("Confirmed: in git repository")
-            return True
-        except subprocess.CalledProcessError:
-            logger.warning("Not in a git repository")
-            return False
-
-    def has_staged_changes(self) -> bool:
-        """Check if there are staged changes"""
-        logger.debug("Checking for staged changes")
-        try:
-            result = subprocess.run(
-                ["git", "diff", "--staged", "--name-only"],
-                capture_output=True,
-                text=True,
-                check=True
-            )
-            has_changes = bool(result.stdout.strip())
-            logger.debug(f"Staged changes found: {has_changes}")
-            return has_changes
-        except subprocess.CalledProcessError:
-            logger.warning("Failed to check for staged changes")
-            return False
-
-    async def analyze_changes(self, staged: bool = True) -> CommitSummary:
-        """Analyze git changes and generate commit summary"""
-        logger.info("Starting analysis of git changes")
-
-        if not self.check_git_repo():
-            raise RuntimeError("Not in a git repository")
-
-        if staged and not self.has_staged_changes():
-            raise RuntimeError("No staged changes found. Use 'git add' to stage files first.")
-
-        # Get the diff
-        diff_output = self.get_git_diff(staged)
-
-        if not diff_output.strip():
-            raise RuntimeError("No changes found")
-
-        # Use PydanticAI to analyze the diff
-        logger.info("Sending diff to AI model for analysis")
-        with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                console=console,
-                transient=True
-        ) as progress:
-            task = progress.add_task("Analyzing changes with AI...", total=None)
-
-            if self.supports_structured_output:
-                result = await self.agent.run(
-                    f"Analyze this git diff and create a structured commit summary:\n\n{diff_output}"
-                )
-                summary = result.data
-            else:
-                # Fallback for models without structured output support
-                result = await self.agent.run(
-                    f"Analyze this git diff and create a commit message:\n\n{diff_output}"
-                )
-
-                # Parse the JSON response manually
-                import json
-                try:
-                    response_text = result.data.strip()
-                    # Remove any markdown code blocks if present
-                    if response_text.startswith('```json'):
-                        response_text = response_text.split('```json')[1].split('```')[0].strip()
-                    elif response_text.startswith('```'):
-                        response_text = response_text.split('```')[1].split('```')[0].strip()
-
-                    json_data = json.loads(response_text)
-                    summary = CommitSummary(**json_data)
-                except (json.JSONDecodeError, Exception) as e:
-                    logger.error(f"Failed to parse JSON response: {e}")
-                    logger.debug(f"Raw response: {result.data}")
-                    # Create a basic summary as fallback
-                    summary = CommitSummary(
-                        overall_summary="Update files",
-                        commit_type="chore",
-                        file_changes=[],
-                        detailed_description=f"AI response: {result.data[:200]}..."
-                    )
-
-            progress.update(task, completed=True)
-
-        logger.info("AI analysis completed successfully")
-        logger.debug(f"Token usage: {result.usage()}")
-
-        return summary
-
-    def format_commit_message(self, summary: CommitSummary) -> str:
-        """Format the commit summary as a conventional commit message"""
-        logger.debug("Formatting commit message")
-
-        commit_msg = f"{summary.commit_type}: {summary.overall_summary}"
-
-        if summary.detailed_description:
-            commit_msg += f"\n\n{summary.detailed_description}"
-
-        if summary.file_changes:
-            commit_msg += "\n\nFiles changed:"
-            for change in summary.file_changes:
-                commit_msg += f"\n- {change.file_path}: {change.summary}"
-                if change.lines_added or change.lines_removed:
-                    commit_msg += f" (+{change.lines_added}/-{change.lines_removed})"
-
-        return commit_msg
-
-# Typer CLI app
+# CLI Application
 app = typer.Typer(
     name="git-analyzer",
     help="Analyze git changes and generate commit messages using local AI models",
@@ -282,53 +338,43 @@ app = typer.Typer(
 
 @app.command()
 def analyze(
-        unstaged: Annotated[bool, typer.Option("--unstaged", help="Analyze unstaged changes instead of staged")] = False,
-        model: Annotated[str, typer.Option("--model", help="Ollama model to use")] = " llama3.1:8b",
-        base_url: Annotated[str, typer.Option("--base-url", help="Ollama base URL")] = "http://localhost:11434/v1",
-        commit: Annotated[bool, typer.Option("--commit", help="Automatically commit with generated message")] = False,
-        output_format: Annotated[str, typer.Option("--output", help="Output format")] = "text",
-        verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Enable verbose logging")] = False,
+        unstaged: bool = typer.Option(False, "--unstaged", help="Analyze unstaged changes instead of staged"),
+        model: str = typer.Option("llama3.1:8b", "--model", help="Ollama model to use"),
+        base_url: str = typer.Option("http://localhost:11434/v1", "--base-url", help="Ollama base URL"),
+        commit: bool = typer.Option(False, "--commit", help="Automatically commit with generated message"),
+        output_format: str = typer.Option("text", "--output", help="Output format"),
+        verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose logging"),
 ):
     """Analyze git changes and generate commit messages"""
 
-    # Set logging level based on verbose flag
     if verbose:
         logging.getLogger().setLevel(logging.DEBUG)
-        logger.debug("Verbose logging enabled")
 
     console.print(Panel.fit(
         f"[bold blue]Git Diff Analyzer[/bold blue]\n"
         f"Model: [cyan]{model}[/cyan]\n"
         f"Analyzing: [yellow]{'unstaged' if unstaged else 'staged'}[/yellow] changes",
-        border_style="blue"
+        border_style="blue",
     ))
 
-    analyzer = GitDiffAnalyzer(model_name=model, base_url=base_url)
+    config = AnalyzerConfig(model_name=model, base_url=base_url)
 
     try:
-        import asyncio
-
-        # Analyze the changes
-        summary = asyncio.run(analyzer.analyze_changes(staged=not unstaged))
+        # Functional composition for the main workflow
+        summary = asyncio.run(analyze_git_changes(config, staged=not unstaged))
 
         if output_format == "json":
             console.print_json(summary.model_dump_json(indent=2))
         else:
-            commit_message = analyzer.format_commit_message(summary)
+            commit_message = format_commit_message(summary)
 
             console.print("\n[bold green]Generated Commit Message:[/bold green]")
-            console.print(Panel(
-                commit_message,
-                border_style="green",
-                title="Commit Message"
-            ))
+            console.print(Panel(commit_message, border_style="green", title="Commit Message"))
 
             if commit:
-                # Ask for confirmation
                 confirm = typer.confirm("\nCommit with this message?")
                 if confirm:
-                    logger.info("Committing changes with generated message")
-                    subprocess.run(["git", "commit", "-m", commit_message], check=True)
+                    run_subprocess_command(["git", "commit", "-m", commit_message])
                     console.print("✅ [bold green]Changes committed successfully![/bold green]")
                 else:
                     console.print("❌ [yellow]Commit cancelled[/yellow]")
@@ -344,29 +390,20 @@ def models():
     console.print("[bold blue]Checking available Ollama models...[/bold blue]")
 
     try:
-        result = subprocess.run(
-            ["ollama", "list"],
-            capture_output=True,
-            text=True,
-            check=True
-        )
+        if not check_ollama_available():
+            raise RuntimeError("Ollama not available")
 
+        output = run_subprocess_command(["ollama", "list"])
         console.print("\n[bold green]Available Models:[/bold green]")
-        console.print(result.stdout)
+        console.print(output)
 
-    except subprocess.CalledProcessError:
+    except Exception:
         console.print("❌ [bold red]Failed to list models. Is Ollama running?[/bold red]")
         console.print("Try running: [cyan]ollama serve[/cyan]")
         raise typer.Exit(1)
-    except FileNotFoundError:
-        console.print("❌ [bold red]Ollama not found. Please install Ollama first.[/bold red]")
-        console.print("Visit: [cyan]https://ollama.ai[/cyan]")
-        raise typer.Exit(1)
 
 @app.command()
-def pull(
-        model_name: Annotated[str, typer.Argument(help="Model name to pull")]
-):
+def pull(model_name: str = typer.Argument(help="Model name to pull")):
     """Pull a new Ollama model"""
     console.print(f"[bold blue]Pulling model: {model_name}[/bold blue]")
 
@@ -377,12 +414,7 @@ def pull(
                 console=console
         ) as progress:
             task = progress.add_task(f"Downloading {model_name}...", total=None)
-
-            result = subprocess.run(
-                ["ollama", "pull", model_name],
-                check=True
-            )
-
+            subprocess.run(["ollama", "pull", model_name], check=True)
             progress.update(task, completed=True)
 
         console.print(f"✅ [bold green]Successfully pulled {model_name}[/bold green]")
