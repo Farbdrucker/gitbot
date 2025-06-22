@@ -589,7 +589,7 @@ def pull(model_name: str = typer.Argument(help="Model name to pull")):
 
     try:
         with Progress(
-            SpinnerColumn(),
+            SpinnerColumn("clock"),
             TextColumn("[progress.description]{task.description}"),
             console=console,
         ) as progress:
