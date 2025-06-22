@@ -121,6 +121,7 @@ def get_git_diff(staged: bool = True) -> str:
     # Get file status and stats
     status_output = run_git_command(cmd_base + ["--stat", "--name-status"])
 
+    logger.info(f"Git status {'staged' if staged else 'unstaged'} files for commit:\n{status_output}")
     # Get actual diff content
     diff_content = run_git_command(cmd_base)
 
@@ -497,14 +498,14 @@ app = typer.Typer(
 @app.command("analyze", short_help="Analyze git changes and generate commit messages")
 def analyze(
     unstaged: bool = typer.Option(
-        False, "--unstaged", help="Analyze unstaged changes instead of staged"
+        False, "-u", "--unstaged", help="Analyze unstaged changes instead of staged"
     ),
-    model: str = typer.Option("llama3.1:8b", "--model", help="Ollama model to use"),
+    model: str = typer.Option("llama3.1:8b", "-m", "--model", help="Ollama model to use"),
     base_url: str = typer.Option(
         "http://localhost:11434/v1", "--base-url", help="Ollama base URL"
     ),
     commit: bool = typer.Option(
-        False, "--commit", help="Automatically commit with generated message"
+        False, "-c", "--commit", help="Automatically commit with generated message"
     ),
     output_format: str = typer.Option("text", "--output", help="Output format"),
     verbose: bool = typer.Option(

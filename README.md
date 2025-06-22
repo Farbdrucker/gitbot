@@ -45,3 +45,9 @@ and for a specific command
 ```shell
 uv run main.py analyze --help
 ```
+
+## For other Projects
+Install the package with `uv pip` to make is accessible in other projects:
+```shell
+uv pip install -e .
+``
