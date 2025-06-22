@@ -7,8 +7,9 @@ import asyncio
 import json
 import logging
 import subprocess
+from abc import abstractmethod
 from dataclasses import dataclass
-from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple, Union, Literal
 
 import typer
 from pydantic import BaseModel, Field
@@ -93,8 +94,9 @@ def run_git_command(cmd: List[str]) -> str:
 def check_git_repo() -> bool:
     """Check if current directory is a git repository"""
     try:
+        cmd = GitCommand(RevParse()).compile()
         subprocess.run(
-            ["git", "rev-parse", "--git-dir"], capture_output=True, check=True
+            cmd, capture_output=True, check=True
         )
         return True
     except subprocess.CalledProcessError:
@@ -103,9 +105,10 @@ def check_git_repo() -> bool:
 
 def check_staged_changes() -> bool:
     """Check if there are staged changes"""
+    cmd = GitCommand(Diff(staged=True, name_only=True)).compile()
     try:
         result = subprocess.run(
-            ["git", "diff", "--staged", "--name-only"],
+            cmd,
             capture_output=True,
             text=True,
             check=True,
@@ -115,12 +118,66 @@ def check_staged_changes() -> bool:
         return False
 
 
+class GitSubCommand:
+    @abstractmethod
+    def compile(self) -> List[str]:
+        pass
+
+
+@dataclass(frozen=True)
+class Diff(GitSubCommand):
+    staged: bool = True
+    stat: bool = False
+    name_status: bool = False
+    name_only: bool = False
+
+    def compile(self) -> List[str]:
+        return (
+            ["git", "diff"]
+            + (["--staged"] if self.staged else [])
+            + (["--name-only"] if self.name_only else [])
+            + (["--stat"] if self.stat else [])
+            + (["--name-status"] if self.name_status else [])
+        )
+
+
+@dataclass(frozen=True)
+class RevParse(GitSubCommand):
+
+    def compile(self) -> List[str]:
+        return ["git", "rev-parse", "--git-dir"]
+
+
+@dataclass(frozen=True)
+class Commit(GitSubCommand):
+    message: str
+    staged: bool = False
+
+    def compile(self) -> List[str]:
+        return (
+            ["git", "commit"] + (["-a"] if not self.staged else []) + ["-m", f"\"{self.message}\""]
+        )
+
+
+@dataclass(frozen=True)
+class GitCommand(GitSubCommand):
+    """Git command to execute"""
+
+    command: Union[Diff, RevParse, Commit]
+
+    def compile(self) -> List[str]:
+        """Compile the git command into a list of arguments"""
+        cmd = self.command.compile()
+        console.print(f"Compiling git command: {' '.join(cmd)}")
+        return cmd
+
+
 def get_git_diff(staged: bool = True) -> str:
     """Get git diff output"""
-    cmd_base = ["git", "diff", "--staged"] if staged else ["git", "diff"]
+    cmd_base = GitCommand(Diff(staged=staged, stat=True, name_status=True)).compile()
 
     # Get file status and stats
-    status_output = run_git_command(cmd_base + ["--stat", "--name-status"])
+    status_output = run_git_command(cmd_base)
 
     logger.info(
         f"Git status {'staged' if staged else 'unstaged'} files for commit:\n{status_output}"
@@ -550,10 +607,8 @@ def analyze(
             if commit:
                 confirm = typer.confirm("\nCommit with this message?")
                 if confirm:
-                    commit_cmd = ["git", "commit"]
-                    if unstaged:
-                        commit_cmd.append("-a")
-                    commit_cmd.extend(["-m", f'"{commit_message}"'])
+                    commit_cmd = GitCommand(Commit(message=commit_message, staged=not unstaged)).compile()
+
                     run_subprocess_command(commit_cmd)
                     console.print(
                         "✅ [bold green]Changes committed successfully![/bold green]"
