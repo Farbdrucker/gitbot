@@ -547,7 +547,7 @@ def analyze(
                     commit_cmd = ["git", "commit"]
                     if unstaged:
                         commit_cmd.append("-a")
-                    commit_cmd.extend(["-m", f'\"commit_message\"'])
+                    commit_cmd.extend(["-m", f'\"{commit_message}"'])
                     run_subprocess_command(commit_cmd)
                     console.print(
                         "✅ [bold green]Changes committed successfully![/bold green]"
