@@ -81,6 +81,7 @@ class GitContext:
 # Pure Functions for Git Operations
 def run_git_command(cmd: List[str]) -> str:
     """Pure function to run git command and return output"""
+    logger.debug(f"Running command: {' '.join(cmd)}")
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         return result.stdout
@@ -468,6 +469,7 @@ async def analyze_git_changes(
 # Utility Functions for CLI
 def run_subprocess_command(cmd: List[str]) -> str:
     """Run subprocess command and return output"""
+    logger.debug(f"Running command: {' '.join(cmd)}")
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
         return result.stdout
@@ -542,7 +544,11 @@ def analyze(
             if commit:
                 confirm = typer.confirm("\nCommit with this message?")
                 if confirm:
-                    run_subprocess_command(["git", "commit", "-m", commit_message])
+                    commit_cmd = ["git", "commit", "-m"]
+                    if unstaged:
+                        commit_cmd.append("-a")
+                    commit_cmd.append(commit_message)
+                    run_subprocess_command(commit_cmd)
                     console.print(
                         "✅ [bold green]Changes committed successfully![/bold green]"
                     )

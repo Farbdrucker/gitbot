@@ -3,6 +3,9 @@ name = "gitbot"
 version = "0.1.0"
 description = "Local AI agent to create git commit messages based on the changes"
 readme = "README.md"
+authors = [
+    { name = "Lukas Sanner", email = "lukas.sanner@gmx.de"}
+]
 requires-python = ">=3.12"
 dependencies = [
     "pydantic>=2.11.7",
