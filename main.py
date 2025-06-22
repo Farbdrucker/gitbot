@@ -3,17 +3,18 @@
 Functional Git Diff Analyzer - Generates structured commit messages using functional programming
 """
 
-import subprocess
-import logging
-import json
 import asyncio
-from typing import List, Optional, Dict, Any, Tuple, Callable, Union, Coroutine
+import json
+import logging
+import subprocess
 from dataclasses import dataclass
+from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple, Union
+
+import typer
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
 from pydantic_ai.models.openai import OpenAIModel
 from pydantic_ai.providers.openai import OpenAIProvider
-import typer
 from rich.console import Console
 from rich.logging import RichHandler
 from rich.panel import Panel
@@ -121,7 +122,9 @@ def get_git_diff(staged: bool = True) -> str:
     # Get file status and stats
     status_output = run_git_command(cmd_base + ["--stat", "--name-status"])
 
-    logger.info(f"Git status {'staged' if staged else 'unstaged'} files for commit:\n{status_output}")
+    logger.info(
+        f"Git status {'staged' if staged else 'unstaged'} files for commit:\n{status_output}"
+    )
     # Get actual diff content
     diff_content = run_git_command(cmd_base)
 
@@ -500,7 +503,9 @@ def analyze(
     unstaged: bool = typer.Option(
         False, "-u", "--unstaged", help="Analyze unstaged changes instead of staged"
     ),
-    model: str = typer.Option("llama3.1:8b", "-m", "--model", help="Ollama model to use"),
+    model: str = typer.Option(
+        "llama3.1:8b", "-m", "--model", help="Ollama model to use"
+    ),
     base_url: str = typer.Option(
         "http://localhost:11434/v1", "--base-url", help="Ollama base URL"
     ),
@@ -548,7 +553,7 @@ def analyze(
                     commit_cmd = ["git", "commit"]
                     if unstaged:
                         commit_cmd.append("-a")
-                    commit_cmd.extend(["-m", f'\"{commit_message}"'])
+                    commit_cmd.extend(["-m", f'"{commit_message}"'])
                     run_subprocess_command(commit_cmd)
                     console.print(
                         "✅ [bold green]Changes committed successfully![/bold green]"
