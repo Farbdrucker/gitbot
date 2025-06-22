@@ -7,7 +7,7 @@ import subprocess
 import logging
 import json
 import asyncio
-from typing import List, Optional, Dict, Any, Tuple, Callable, Union
+from typing import List, Optional, Dict, Any, Tuple, Callable, Union, Coroutine
 from dataclasses import dataclass
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
@@ -141,7 +141,15 @@ def create_system_prompt() -> str:
     - Be specific about what changed, not just which files
     - Focus on the "why" and "what" rather than technical details
     - For each file, summarize the purpose/impact of changes
-    - Identify the change type accurately (added/modified/deleted/renamed)
+    - Use EXACT change types: "added", "modified", "deleted", "renamed" (not "M", "A", "D")
+
+    IMPORTANT: The file_changes field must be an array of objects, not a string.
+    Each file change object must have:
+    - file_path: string
+    - change_type: one of "added", "modified", "deleted", "renamed" 
+    - summary: string describing what changed
+    - lines_added: integer (default 0)
+    - lines_removed: integer (default 0)
 
     Examples of good summaries:
     - "Add user authentication middleware"
@@ -163,6 +171,7 @@ def create_fallback_prompt() -> str:
     - Keep the first line under 50 characters when possible
     - Be specific about what changed, not just which files
     - Focus on the "why" and "what" rather than technical details
+    - Use EXACT change types: "added", "modified", "deleted", "renamed" (not "M", "A", "D")
 
     Format your response as JSON with this exact structure:
     {
@@ -179,6 +188,8 @@ def create_fallback_prompt() -> str:
         }
       ]
     }
+
+    CRITICAL: file_changes must be an array of objects, NOT a string.
 
     Examples of good summaries:
     - "Add user authentication middleware"
@@ -199,14 +210,16 @@ def create_agent(config: AnalyzerConfig) -> Tuple[Agent, bool]:
         agent = Agent(
             model=model,
             result_type=CommitSummary,
-            system_prompt=create_system_prompt()
+            system_prompt=create_system_prompt(),
+            retries=2  # Add retries for validation errors
         )
         return agent, True
     except Exception as e:
         logger.warning(f"Model doesn't support structured output, falling back to text mode: {e}")
         agent = Agent(
             model=model,
-            system_prompt=create_fallback_prompt()
+            system_prompt=create_fallback_prompt(),
+            retries=2
         )
         return agent, False
 
@@ -220,18 +233,98 @@ def clean_json_response(response: str) -> str:
         response = response.split('```')[1].split('```')[0].strip()
     return response
 
+def normalize_change_type(change_type: str) -> str:
+    """Normalize git change type to expected format"""
+    mapping = {
+        "M": "modified",
+        "A": "added",
+        "D": "deleted",
+        "R": "renamed",
+        "modified": "modified",
+        "added": "added",
+        "deleted": "deleted",
+        "renamed": "renamed"
+    }
+    return mapping.get(change_type, "modified")
+
+def fix_file_changes(file_changes: Any) -> List[Dict[str, Any]]:
+    """Fix file_changes if it's a string or has incorrect format"""
+    if isinstance(file_changes, str):
+        try:
+            # Try to parse as JSON string
+            parsed = json.loads(file_changes)
+            if isinstance(parsed, list):
+                file_changes = parsed
+            else:
+                file_changes = [parsed]
+        except json.JSONDecodeError:
+            # Create a basic file change entry
+            file_changes = [{
+                "file_path": "unknown",
+                "change_type": "modified",
+                "summary": "File updated",
+                "lines_added": 0,
+                "lines_removed": 0
+            }]
+
+    if not isinstance(file_changes, list):
+        file_changes = [file_changes] if file_changes else []
+
+    # Normalize each file change
+    normalized = []
+    for change in file_changes:
+        if isinstance(change, dict):
+            normalized_change = {
+                "file_path": change.get("file_path", "unknown"),
+                "change_type": normalize_change_type(change.get("change_type", "modified")),
+                "summary": change.get("summary", change.get("purpose", "File updated")),
+                "lines_added": change.get("lines_added", 0),
+                "lines_removed": change.get("lines_removed", 0)
+            }
+            normalized.append(normalized_change)
+
+    return normalized if normalized else [{
+        "file_path": "unknown",
+        "change_type": "modified",
+        "summary": "File updated",
+        "lines_added": 0,
+        "lines_removed": 0
+    }]
+
 def parse_json_response(response: str) -> Dict[str, Any]:
-    """Parse JSON response with error handling"""
+    """Parse JSON response with error handling and normalization"""
     try:
         cleaned = clean_json_response(response)
-        return json.loads(cleaned)
+        data = json.loads(cleaned)
+
+        # Fix file_changes if needed
+        if "file_changes" in data:
+            data["file_changes"] = fix_file_changes(data["file_changes"])
+
+        # Ensure required fields exist
+        if "overall_summary" not in data:
+            data["overall_summary"] = "Update files"
+        if "commit_type" not in data:
+            data["commit_type"] = "chore"
+        if "file_changes" not in data:
+            data["file_changes"] = []
+
+        return data
+
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse JSON response: {e}")
+        logger.debug(f"Raw response: {response}")
         return {
             "overall_summary": "Update files",
             "commit_type": "chore",
-            "file_changes": [],
-            "detailed_description": f"AI response: {response[:200]}..."
+            "file_changes": [{
+                "file_path": "unknown",
+                "change_type": "modified",
+                "summary": "File updated",
+                "lines_added": 0,
+                "lines_removed": 0
+            }],
+            "detailed_description": f"AI parsing failed: {response[:200]}..."
         }
 
 def create_commit_summary_from_dict(data: Dict[str, Any]) -> CommitSummary:
@@ -239,7 +332,8 @@ def create_commit_summary_from_dict(data: Dict[str, Any]) -> CommitSummary:
     return CommitSummary(**data)
 
 # Higher-order Functions for Analysis Pipeline
-def create_analysis_pipeline(agent: Agent, supports_structured: bool) -> Callable[[str], Callable]:
+def create_analysis_pipeline(agent: Agent, supports_structured: bool) -> Callable[
+    [str], Coroutine[Any, Any, CommitSummary]]:
     """Create analysis pipeline function"""
     async def analyze_diff(diff_output: str) -> CommitSummary:
         result = await agent.run(
@@ -247,7 +341,7 @@ def create_analysis_pipeline(agent: Agent, supports_structured: bool) -> Callabl
         )
 
         if supports_structured:
-            return result.data
+            return result.output
         else:
             # Functional composition for fallback processing
             return (lambda x: create_commit_summary_from_dict(parse_json_response(x)))(result.data)
